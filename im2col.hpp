@@ -28,6 +28,16 @@ cudaError_t bu_im2colWithCuda(
 	const int num_kernels,
 	float* data_kernel,
 	float* data_ret);
+cudaError_t convWithCuda(
+        float* data_out,
+        float* data_in,
+        float* weights,
+        float* bias,
+        const int weightHeight, 
+        const int outSize,
+        const int inSize,
+        const int batch_size);
+
 cudaError_t fcWithCuda(
         float* data_out,
         float* data_in,

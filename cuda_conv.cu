@@ -33,12 +33,13 @@ void block_fc_forward(const int height, const int width, const int channels, con
 
         const int dataArraySize = height * width * channels;
         const int kernelSize = dataArraySize * outSize;
-        float *data_in = new float[dataArraySize];
+        float *data_in = new float[dataArraySize*batch_size];
         float *weights = new float[kernelSize];
         float *bias = new float[outSize]();
-        float *data_out = new float[outSize];
-        init_data(data_in, dataArraySize);
+        float *data_out = new float[outSize*batch_size];
+        init_data(data_in, dataArraySize*batch_size);
         init_data(weights, kernelSize);
+        init_data(bias,outSize);
         fcWithCuda(data_out, data_in, weights, bias,dataArraySize,outSize,1,batch_size);
 }
 
@@ -63,7 +64,6 @@ void block_conv_forward(const int height, const int width, const int channels, c
 	float *yl1 = new float[resultArraySize]();
 	//float *r2 = new float[resultArraySize]();
 
-	srand(2014);
 	init_data(image, arraySize);
 	init_data(data_kernel, kernelArraySize);
 
@@ -84,8 +84,63 @@ void block_conv_forward(const int height, const int width, const int channels, c
                 fprintf(stderr, "fcWithCuda failed!");
                 return ;
         }
-        cudaStatus=fcWithCuda(yl1, col1, data_kernel, bias, weightHeight, resultWidth, inHeight, batch_size);
-	delete [] col1;
+        cudaStatus=convWithCuda(yl1, col1, data_kernel, bias, weightHeight, resultWidth, inHeight, batch_size);
+}
+void block_conv_backward(const int batch_size, const int channels, const int num_kernels,const int height, const int width, const int ksize, const int pad, const int stride){
+	const int dataSize=height * width * channels;
+        int height_col = (height + 2 * pad - ksize) / stride + 1;
+        int width_col = (width + 2 * pad - ksize) / stride + 1;
+        int colArraySize = height_col * width_col * channels *ksize*ksize ;
+	const int resultArraySize = num_kernels * height_col * width_col;
+	const int kernelArraySize = num_kernels * ksize * ksize * channels;
+        const int inheight = height_col*width_col;
+        int inwidth = ksize*ksize*channels;
+
+	float *dy = new float[resultArraySize];
+	float *weights = new float[kernelArraySize];
+	float *data_in = new float[dataSize*batch_size];
+	float *bias = new float[num_kernels]();
+	float *col1 = new float[colArraySize*batch_size]();
+
+	init_data(dy, resultArraySize*batch_size);
+	init_data(weights, kernelArraySize);
+	init_data(data_in, dataSize*batch_size);
+/*
+	printf("dy\n");
+	print_data(dy,resultArraySize*batch_size);
+	printf("weights\n");
+	print_data(weights,kernelArraySize);
+	printf("data_in\n");
+	print_data(data_in,dataSize*batch_size);
+*/
+	float *dw = new float[kernelArraySize]();
+	float *db = new float[num_kernels]();
+	float *dx = new float[colArraySize*batch_size]();
+
+	cudaError_t cudaStatus = cudaSetDevice(0);
+	float *r1 = new float[resultArraySize]();
+	cudaStatus = im2colWithCuda(data_in, batch_size, channels, height, width, ksize, pad, stride, col1, num_kernels, weights, r1);
+//	printf("conv1, conl1 \n");
+ //       print_data(col1,colArraySize*batch_size); 
+	if (cudaStatus != cudaSuccess) {
+		fprintf(stderr, "im2colWithCuda failed!");
+		return ;
+	}
+
+        cudaStatus=convBPWithCuda(dx,dw,db,dy, col1, weights, bias, inwidth, num_kernels,inheight, batch_size);
+	if (cudaStatus != cudaSuccess) {
+		fprintf(stderr, "convBPWithCuda failed!");
+		return ;
+	}
+/*
+	printf("dw\n");
+	print_data(dw,kernelArraySize);
+	printf("dx\n");
+	print_data(dx,colArraySize*batch_size);
+	printf("db\n");
+	print_data(db,num_kernels);
+*/
+	return;
 }
 void block_pool_forward(const int height, const int  width, const int channels, const int batch_size, const int ksize, const int pad, const int stride){
 
@@ -150,62 +205,6 @@ void block_relu_backward(const int height, const int  width, const int channels,
 	cudaStatus=reluBPWithCuda(dy,data_in,dx,indataArraySize, batch_size);
 }
 
-void block_conv_backward(const int batch_size, const int channels, const int num_kernels,const int height, const int width, const int ksize, const int pad, const int stride){
-	const int dataSize=height * width * channels;
-        int height_col = (height + 2 * pad - ksize) / stride + 1;
-        int width_col = (width + 2 * pad - ksize) / stride + 1;
-        int colArraySize = height_col * width_col * channels *ksize*ksize ;
-	const int resultArraySize = num_kernels * height_col * width_col;
-	const int kernelArraySize = num_kernels * ksize * ksize * channels;
-        const int inheight = height_col*width_col;
-        int inwidth = ksize*ksize*channels;
-
-	float *dy = new float[resultArraySize];
-	float *weights = new float[kernelArraySize];
-	float *data_in = new float[dataSize*batch_size];
-	float *bias = new float[num_kernels]();
-	float *col1 = new float[colArraySize*batch_size]();
-
-	init_data(dy, resultArraySize*batch_size);
-	init_data(weights,kernelArraySize);
-	init_data(data_in, dataSize*batch_size);
-/*
-	printf("dy\n");
-	print_data(dy,resultArraySize*batch_size);
-	printf("weights\n");
-	print_data(weights,kernelArraySize);
-	printf("data_in\n");
-	print_data(data_in,dataSize*batch_size);
-*/
-	float *dw = new float[kernelArraySize]();
-	float *db = new float[num_kernels]();
-	float *dx = new float[colArraySize*batch_size]();
-
-	cudaError_t cudaStatus = cudaSetDevice(0);
-	float *r1 = new float[resultArraySize]();
-	cudaStatus = im2colWithCuda(data_in, batch_size, channels, height, width, ksize, pad, stride, col1, num_kernels, weights, r1);
-//	printf("conv1, conl1 \n");
- //       print_data(col1,colArraySize*batch_size); 
-	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "im2colWithCuda failed!");
-		return ;
-	}
-
-        cudaStatus=convBPWithCuda(dx,dw,db,dy, col1, weights, bias, inwidth,num_kernels,inheight, batch_size);
-	if (cudaStatus != cudaSuccess) {
-		fprintf(stderr, "convBPWithCuda failed!");
-		return ;
-	}
-/*
-	printf("dw\n");
-	print_data(dw,kernelArraySize);
-	printf("dx\n");
-	print_data(dx,colArraySize*batch_size);
-	printf("db\n");
-	print_data(db,num_kernels);
-*/
-	return;
-}
 void block_fc_backward(const int batch_size, const int inSize, const int outSize){
 	float *dy = new float[outSize*batch_size];
 	float *weights = new float[inSize*outSize];
@@ -215,6 +214,7 @@ void block_fc_backward(const int batch_size, const int inSize, const int outSize
 	init_data(dy,outSize*batch_size);
 	init_data(weights,outSize*inSize);
 	init_data(data_in, inSize*batch_size);
+	init_data(bias, outSize);
 /*
 	printf("dy\n");
 	print_data(dy,outSize*batch_size);
@@ -247,10 +247,10 @@ int main()
 {
 	//cudaError_t cudaStatus;
 	const int batch_size = 1 ;
-        //conv1
-//	block_conv_forward(28,28,1,batch_size,5,0,1,20);
+      //conv1
+/*	block_conv_forward(28,28,1,batch_size,5,0,1,20);
 	//pool1
-/*	block_pool_forward(24,24,20,batch_size,2,0,2);
+	 block_pool_forward(24,24,20,batch_size,2,0,2);
 	//conv2
 	block_conv_forward(12,12,20,batch_size,5,0,1,50);
 	//pool2
@@ -260,14 +260,13 @@ int main()
 	//relu
 //	block_relu_forward(1,1,500,batch_size);
 	//ip2
-	//block_fc_forward(1,1,500,10,batch_size);
-*/
-/*	block_fc_backward(batch_size,500,10);
+	block_fc_forward(1,1,500,10,batch_size);
+	block_fc_backward(batch_size,500,10);
 	block_relu_backward(1,1,500,batch_size);
-	//block_fc_backward(batch_size,4*4*50,500);
+	block_fc_backward(batch_size,4*4*50,500);
 	block_pool_backward(8,8,50,batch_size,2,0,2);
 	block_conv_backward(batch_size,20,50,12,12,5,0,1);
-	block_pool_backward(24,24,20,batch_size,2,0,2);
+/	block_pool_backward(24,24,20,batch_size,2,0,2);
 */	block_conv_backward(batch_size,1,20,28,28,5,0,1);
 	//ip1
 	return 0;

@@ -3,16 +3,16 @@
 
 __global__ void fc_gpu_kernel(float *y, float *x, float *weights, const int weightHeight,const int outSize, const int inSize){
         //printf(x);
-        int row = blockIdx.x*blockDim.x+threadIdx.x;
-        int col = blockIdx.y*blockDim.y+threadIdx.y;
+        int row = blockIdx.y*blockDim.y+threadIdx.y;
+        int col = blockIdx.x*blockDim.x+threadIdx.x;
 	//printf("row %d, col %d in fc.cu \n",row,col);
         if(row < inSize && col < outSize){
-                float acc = 0;
+                //float acc = 0;
                 for(int i = 0; i < weightHeight; ++i){
   	  	  y[row*outSize+col] +=x[row*weightHeight + i ]*weights[i*outSize+col];
-//                  printf("x[%d] is %.1f,weight[%d] is %.1f\n", row*weightHeight+i,x[row*weightHeight+i],i*outSize+col,weights[i*outSize+col]);
+                  //printf("x[%d] is %.1f,weight[%d] is %.1f\n", row*weightHeight+i,x[row*weightHeight+i],i*outSize+col,weights[i*outSize+col]);
                 }
-//                printf("acc is %3f, y %d is %3f\n",acc, row*outSize+col, y[row*outSize+col] );
+                //printf("acc is %3f, y %d is %3f\n",acc, row*outSize+col, y[row*outSize+col] );
         }
 }
 
@@ -46,11 +46,11 @@ __global__ void BiasForward(Dtype* y, Dtype* bias,int weight_heights, const int 
 	int row = blockIdx.y*blockDim.y+threadIdx.y;
 	int col = blockIdx.x*blockDim.x+threadIdx.x;
 	if(row<inSize && col < outSize){
-  		for(int i = 0; i < weight_heights; ++i){
-			y[i*outSize+col] += bias[col];
+  		//for(int i = 0; i < weight_heights; ++i){
+		y[row*outSize+col] += bias[col];
 	//	printf("y %d is %3f\n",row*outSize+col, y[row*outSize+col] );
-  }
-}                                   
+  //}
+	}                                   
 }
 template <typename Dtype>
 __global__ void BiasBackward(const int n, int inSize, const Dtype* in, Dtype* out) { 
@@ -69,8 +69,10 @@ void fc_gpu(float* data_out, float* data_in, float *weights, float *bias,const i
         //int num_kernels = inSize * outSize;
         //printf("inheight is  %d innum is %d\n",inheight, innum);
 
-        dim3 DimGrid((inSize-1)/32+1, (outSize-1)/32+1, 1);
-        dim3 DimBlock(32,32,1);
+        dim3 DimGrid((inSize-1)/8+1, (outSize-1)/8+1, 1);
+        dim3 DimBlock(8,8,1);
+        //dim3 DimGrid((inSize-1)/32+1, (outSize-1)/32+1, 1);
+        //dim3 DimBlock(32,32,1);
 //	printf("fc_gpu function in fc.cu!\n");
 	fc_gpu_kernel<<<DimGrid, DimBlock>>>(
 		data_out,data_in,weights,weight_heights,outSize,inSize);
@@ -78,6 +80,68 @@ void fc_gpu(float* data_out, float* data_in, float *weights, float *bias,const i
 
 }
 
+cudaError_t convWithCuda(float* data_out,float* x,float* w,float* b,int weight_heights,int outSize,
+	int inSize, const int batch_size)
+{
+	float *dev_x;
+	float *dev_w;
+	float *dev_b;
+	float *dev_out;
+
+	checkCudaErrors(cudaMalloc((void**)&dev_out, inSize * outSize*batch_size * sizeof(float)));
+	checkCudaErrors(cudaMemcpy(dev_out, data_out, inSize * outSize*batch_size*sizeof(float), cudaMemcpyHostToDevice));
+	// image
+	checkCudaErrors(cudaMalloc((void**)&dev_x, inSize* weight_heights * batch_size* sizeof(float)));
+	checkCudaErrors(cudaMemcpy(dev_x, x, inSize*weight_heights* batch_size*sizeof(float), cudaMemcpyHostToDevice));
+	checkCudaErrors(cudaMalloc((void**)&dev_w, weight_heights*outSize* sizeof(float)));
+	checkCudaErrors(cudaMemcpy(dev_w, w,  weight_heights*outSize*sizeof(float), cudaMemcpyHostToDevice));
+	
+	checkCudaErrors(cudaMalloc((void**)&dev_b, outSize* sizeof(float)));
+	checkCudaErrors(cudaMemcpy(dev_b, b, outSize*sizeof(float), cudaMemcpyHostToDevice));
+
+	cudaError_t cudaStatus;
+	cudaStatus = cudaDeviceSynchronize();
+	float* tmp_in = dev_x;
+	float* tmp_w = dev_w;
+	float* tmp_b = dev_b;
+	float* tmp_out = dev_out;
+
+	for(int i = 0; i<batch_size; i++){
+		dim3 DimBlock(8,8,1);
+		dim3 DimGrid((outSize+DimBlock.x-1)/DimBlock.x, (inSize+DimBlock.y-1)/DimBlock.y, 1);
+		fc_gpu_kernel<<<DimGrid, DimBlock>>>(tmp_out,tmp_in,tmp_w,weight_heights,outSize, inSize);
+		tmp_in +=inSize*weight_heights;
+	        BiasForward<<<DimGrid, DimBlock>>>(data_out,b,weight_heights,outSize,inSize);
+		if (cudaStatus != cudaSuccess) {
+			fprintf(stderr, "weights backward convWithCuda failed!");
+			return cudaStatus;
+		}
+		tmp_out +=outSize*inSize;
+	}
+	// Check for any errors launching the kernel
+	checkCudaErrors(cudaGetLastError());
+	
+	// cudaDeviceSynchronize waits for the kernel to finish, and returns
+	// any errors encountered during the launch.
+	cudaStatus = cudaDeviceSynchronize();
+	if (cudaStatus != cudaSuccess) {
+		fprintf(stderr, "cudaDeviceSynchronize returned error code %d after launching fc Kernel!\n", cudaStatus);
+		cudaFree(dev_out);
+		cudaFree(dev_w);
+		cudaFree(dev_b);
+		cudaFree(dev_x);
+
+		return cudaStatus;
+	}
+
+	checkCudaErrors(cudaMemcpy(data_out,dev_out, inSize * outSize * sizeof(float), cudaMemcpyDeviceToHost));
+	cudaFree(dev_out);
+	cudaFree(dev_w);
+	cudaFree(dev_b);
+	cudaFree(dev_x);
+	
+	return cudaStatus;
+}
 
 cudaError_t convBPWithCuda(float* dx,float* dw,	float* db,float* dy,float* x,float* w,	float* b,int weight_heights,int outSize,
 	int inSize, const int batch_size)
@@ -121,7 +185,7 @@ cudaError_t convBPWithCuda(float* dx,float* dw,	float* db,float* dy,float* x,flo
 		tmp_dx +=inSize;
 		BiasBackward<float><<<CAFFE_GET_BLOCKS(outSize*inSize), CAFFE_CUDA_NUM_THREADS>>>(outSize, inSize,tmp_dy,  dev_db);
 		if (cudaStatus != cudaSuccess) {
-			fprintf(stderr, "weights backward fcWithCuda failed!");
+			fprintf(stderr, "weights backward convBPWithCuda failed!");
 			return cudaStatus;
 		}
 		tmp_dy +=outSize;
@@ -191,17 +255,17 @@ cudaError_t fcBPWithCuda(float* dx,float* dw,float* db,	float* dy,float* x,float
 	float* tmp_dy = dev_dy;
 
 	for(int i = 0; i<batch_size; i++){
-		dim3 DimGrid((inSize-1)/8+1, (outSize-1)/8+1, 1);
-		dim3 DimBlock(8,8,1);
+		dim3 DimGrid((inSize-1)/32+1, (outSize-1)/32+1, 1);
+		dim3 DimBlock(32,32,1);
 		fc_gpu_kernel<<<DimGrid, DimBlock>>>(dev_dw,tmp_in,tmp_dy,1,outSize, inSize);
-		dim3 dimGrid(1,(inSize-1)/8+1, 1);
-		dim3 dimBlock(8,8,1);
+		dim3 dimGrid(1,(inSize-1)/32+1, 1);
+		dim3 dimBlock(32,32,1);
 		fc_gpu_kernel<<<dimGrid, dimBlock>>>(tmp_dx,dev_w,tmp_dy,outSize,1,inSize);
 		tmp_in +=inSize;
 		tmp_dx +=inSize;
 		BiasBackward<float><<<CAFFE_GET_BLOCKS(outSize), CAFFE_CUDA_NUM_THREADS>>>(outSize, 1,tmp_dy,  dev_db);
 		if (cudaStatus != cudaSuccess) {
-			fprintf(stderr, "weights backward fcWithCuda failed!");
+			fprintf(stderr, "weights backward fcBPWithCuda failed!");
 			return cudaStatus;
 		}
 		tmp_dy +=outSize;
@@ -256,21 +320,18 @@ cudaError_t fcWithCuda(
         float *dev_b = 0;
         cudaError_t cudaStatus;
 	
-	//printf("fcWithCuda\n");
         // col 
-        checkCudaErrors(cudaMalloc((void**)&dev_out, outSize*weightHeight *batch_size * sizeof(float)));
-
-	//printf("fcWithCuda devout malloc success!\n");
+        checkCudaErrors(cudaMalloc((void**)&dev_out, outSize *batch_size * sizeof(float)));
         // image
-        checkCudaErrors(cudaMalloc((void**)&dev_in, inSize*weightHeight* sizeof(float)));
+        checkCudaErrors(cudaMalloc((void**)&dev_in, inSize*weightHeight* batch_size*sizeof(float)));
 	//printf("fcWithCuda devin malloc %d success!\n",inSize*weightHeight);
-        checkCudaErrors(cudaMemcpy(dev_in, data_in, inSize*weightHeight * sizeof(float), cudaMemcpyHostToDevice));
+        checkCudaErrors(cudaMemcpy(dev_in, data_in, inSize*weightHeight * batch_size * sizeof(float), cudaMemcpyHostToDevice));
 	//printf("fcWithCuda devin memcpy success!\n");
 
         // kernel
-        checkCudaErrors(cudaMalloc((void**)&dev_w, inSize*outSize * sizeof(float)));
+        checkCudaErrors(cudaMalloc((void**)&dev_w, weightHeight*outSize * sizeof(float)));
 	//printf("fcWithCuda devw malloc success!\n");
-        checkCudaErrors(cudaMemcpy(dev_w, weights, inSize*outSize * sizeof(float), cudaMemcpyHostToDevice));
+        checkCudaErrors(cudaMemcpy(dev_w, weights, weightHeight*outSize * sizeof(float), cudaMemcpyHostToDevice));
 
 	//printf("fcWithCuda devw memcpy success!\n");
         // result
@@ -291,7 +352,7 @@ cudaError_t fcWithCuda(
 
         //Perform warmup operation with cublas
                 t_dev_in += inSize*weightHeight;
-                t_dev_out += outSize*weightHeight;
+                t_dev_out += outSize;
         }
 
 
@@ -321,7 +382,7 @@ cudaError_t fcWithCuda(
 
 
         // Copy output vector from GPU buffer to host memory.
-        checkCudaErrors(cudaMemcpy(data_out, dev_out, outSize*weightHeight *batch_size* sizeof(float), cudaMemcpyDeviceToHost));
+        checkCudaErrors(cudaMemcpy(data_out, dev_out, outSize *batch_size* sizeof(float), cudaMemcpyDeviceToHost));
   	checkCudaErrors(cudaFree(dev_in));
 	checkCudaErrors(cudaFree(dev_out));
 	checkCudaErrors(cudaFree(dev_w));
@@ -329,5 +390,3 @@ cudaError_t fcWithCuda(
 	
          return cudaStatus;
 }
- 
-
