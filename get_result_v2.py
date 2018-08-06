@@ -2,7 +2,7 @@ import os
 import time
 import pandas as pd
 base = '/home/bing/cu_learn/im2col/src/'
-path = ['MIVReRAM', 'TSVReRAM', '2DDRAM_0725','ReRAM']
+path = ['MIVReRAM', 'TSVReRAM','ReRAM']
 #path = ['alexnet_TSV/']
 #path = ['alexnet_ReRAM','alexnet_2DDRAM']
 #path = ['ReRAM']
@@ -77,15 +77,21 @@ def get_result(path):
 		rsfile = subpath+result
 		write_file(rsfile,headline)
 
-#def reoutput_kernel(base):
-def reoutput_kernel():
-	base = '/home/bing/cu_learn/im2col/src/ReRAM'
+
+def find_layers(layers,name):
+	for i in range(len(layers)):
+		layer = layers[i]
+		if 'name' in layer.keys():
+			if layer['name'] == name:
+				return i
+#def reoutput_kernel():
+def reoutput_kernel(base):
+	#base = '/home/bing/cu_learn/im2col/src/ReRAM'
 	timepowerFile = get_timepowerFile(base)
-	#print(timepowerFile)
 	i = 0
 	headline='name\tkernel_latency(ns)\tkernel_energy(nJ)\n'	
 	for times, powers in timepowerFile.items():
-		print(times)
+		#print(times)
 		kernel, timelog, powerlog =[],[],[]
 		fs = open(times,'r+')
 		pfile = open(powers,'r+')
@@ -104,64 +110,130 @@ def reoutput_kernel():
 		"""
 		for i in range(len(kernel)):
 			print(kernel[i])
-
 		"""
+		conv_idx, fc_idx, pool_idx, relu_idx=0,0,0,0
+		layers = []
+		i=0
 		while(i<len(kernel)):
+			#print("process:",kernel[i])
+			layer={}
+			ff_layer={}
 			kernel_energy = 0
-			if kernel[i].find('im2col')!=-1: 
+			if kernel[i].find('im2col')!=-1:
 				fctime = 0
 				name=''
+				# BP
 				if kernel[i+1].find('conv')!=-1:
-					kernel_energy += timelog[i+j]*powerlog[i+j]
+					ff_idx = find_layers(layers,'conv'+str(conv_idx))
+					ff_layer = layers[ff_idx]
 					for j in range(2):
 						kernel_energy += timelog[i+j]*powerlog[i+j]
 						fctime += timelog[i+j]	
-						name='conv'
 						headline+="[{name:"+name+',G_latency:'+str(fctime)+',G_energy:'+str(kernel_energy)+','
+						ff_layer['G_latency']=fctime
+						ff_layer['G_energy']=kernel_energy
 					stride=4	
-				else:
+				#FP
+				else:	
 					stride=3
 				for j in range(stride):
 					kernel_energy += timelog[i+j]*powerlog[i+j]
 					fctime += timelog[i+j]	
-					name='conv'
 				if stride == 4:
 					headline+='BPlatency:'+str(fctime)+',BPenergy:'+str(kernel_energy)+'}],'
+					ff_layer['BPlatency']=fctime 
+					ff_layer['BPenergy']=kernel_energy
+					conv_idx = conv_idx-1
+					i=i+stride
+					continue
 				else:
+					conv_idx = conv_idx+1
+					name='conv'+str(conv_idx)
 					headline+="[{name:"+name+',latency:'+str(fctime)+',energy:'+str(kernel_energy)+'}],'
-				i=i+stride
+					layer={"name":name,'latency':fctime,'energy':kernel_energy}
+					i=i+stride
 			elif kernel[i].find('fc')!=-1: 
 				fctime = 0
 				name=''
 				if kernel[i+1].find('fc')!=-1:
-					kernel_energy = timelog[i+j]*powerlog[i+j]
-					fctime = timelog[i+j]	
-					name='fc'
+					ff_idx = find_layers(layers,'fc'+str(fc_idx))
+					ff_layer = layers[ff_idx]
+					kernel_energy = timelog[i]*powerlog[i]
+					fctime = timelog[i]	
 					headline+="[{name:"+name+',G_latency:'+str(fctime)+',G_energy:'+str(kernel_energy)+','
+					ff_layer['G_latency']=fctime
+					ff_layer['G_energy']=kernel_energy
 					stride=3	
 				else:
 					stride=2
 				for j in range(stride):
 					kernel_energy += timelog[i+j]*powerlog[i+j]
 					fctime += timelog[i+j]	
-					name='fc'
 				if stride ==3:
 					headline+=',BPlatency:'+str(fctime)+',BPenergy:'+str(kernel_energy)+'}],'
+					ff_layer['BPlatency']=fctime 
+					ff_layer['BPenergy']=kernel_energy
+					fc_idx = fc_idx-1
+					i=i+stride
+					continue
 				else:
+					fc_idx = fc_idx+1
 					headline+="[{name:"+name+',latency:'+str(fctime)+',energy:'+str(kernel_energy)+'}],'
-				i=i+stride
+					name='fc'+str(fc_idx)
+					layer={"name":name,'latency':fctime,'energy':kernel_energy}
+					i=i+stride
 			
-			else:
+			elif kernel[i].find('Pool')!=-1:
 				kernel_energy = timelog[i]*powerlog[i]
-				headline+="[{name:"+kernel[i]+',latency:'+str(timelog[i])+',energy:'+str(kernel_energy)+'}],'	
-				i=i+1
-		print(headline)
+				fctime = timelog[i]	
+				if kernel[i].find("Backward")!=-1:
+					ff_idx = find_layers(layers,'pool'+str(pool_idx))
+					if ff_idx is not None:
+						ff_layer = layers[ff_idx]
+						ff_layer['BPlatency']=fctime 
+						ff_layer['BPenergy']=kernel_energy
+						pool_idx = pool_idx-1	
+					i=i+1
+					#print(ff_layer)
+					continue
+				else:
+					kernel_energy = timelog[i]*powerlog[i]
+					headline+="[{name:"+kernel[i]+',latency:'+str(timelog[i])+',energy:'+str(kernel_energy)+'}],'	
+					pool_idx = pool_idx+1
+					name='pool'+str(pool_idx)
+					layer={"name":name,'latency':fctime,'energy':kernel_energy}
+					i=i+1
+			elif kernel[i].find('Re')!=-1:
+				kernel_energy = timelog[i]*powerlog[i]
+				fctime = timelog[i]	
+				if kernel[i].find("Backward")!=-1:
+					ff_idx = find_layers(layers,'relu'+str(relu_idx))
+					if ff_idx is not None:
+						ff_layer = layers[ff_idx]
+						ff_layer['BPlatency']=fctime 
+						ff_layer['BPenergy']=kernel_energy
+						relu_idx = relu_idx-1	
+					i=i+1
+					#print(ff_layer)
+					continue
+				else:
+					kernel_energy = timelog[i]*powerlog[i]
+					headline+="[{name:"+kernel[i]+',latency:'+str(timelog[i])+',energy:'+str(kernel_energy)+'}],'	
+					relu_idx = relu_idx+1
+					name='relu'+str(relu_idx)
+					layer={"name":name,'latency':fctime,'energy':kernel_energy}
+					i=i+1
+			#print(layer)
+			layers.append(layer)
+		print("{}={}".format(times,layers))
+		#print(headline)
 		"""
 		rsfile = base+'kernel.csv'
-		write_file(rsfile,headline)
-"""		"""
+		write_file(rsfile,layers)
+		"""
+
 for subpath in path:
 	print(subpath)
-reoutput_kernel(base+subpath)
-"""
-reoutput_kernel()
+	reoutput_kernel(base+subpath)
+
+#reoutput_kernel()
